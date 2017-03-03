@@ -243,6 +243,15 @@ lazy val twirl = http4sProject("twirl")
   .enablePlugins(SbtTwirl)
   .dependsOn(core, testing % "test->test")
 
+lazy val prometheus = libraryProject("prometheus")
+  .settings(
+    description := "Prometheus instrumentation for http4s",
+    libraryDependencies ++= Seq(
+      simpleClientCommon
+    )
+  )
+  .dependsOn(core, testing % "test->test")
+
 lazy val bench = http4sProject("bench")
   .enablePlugins(JmhPlugin)
   .settings(noPublishSettings)
@@ -381,14 +390,14 @@ lazy val examples = http4sProject("examples")
   .settings(noPublishSettings)
   .settings(noCoverageSettings)
   .settings(
-  description := "Common code for http4s examples",
+    description := "Common code for http4s examples",
     libraryDependencies ++= Seq(
       circeGeneric,
       logbackClassic % "runtime",
       jspApi % "runtime" // http://forums.yourkit.com/viewtopic.php?f=2&t=3733
     )
-)
-  .dependsOn(server, serverMetrics, theDsl, circe, scalaXml, twirl)
+  )
+  .dependsOn(server, serverMetrics, prometheus, theDsl, circe, scalaXml, twirl)
   .enablePlugins(SbtTwirl)
 
 lazy val examplesBlaze = exampleProject("examples-blaze")

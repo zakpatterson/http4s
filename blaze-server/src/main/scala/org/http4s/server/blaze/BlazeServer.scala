@@ -10,6 +10,7 @@ import java.util.concurrent.ExecutorService
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
+import org.http4s.blaze.MonitorStage
 import org.http4s.blaze.channel
 import org.http4s.blaze.pipeline.LeafBuilder
 import org.http4s.blaze.pipeline.stages.{SSLStage, QuietTimeoutStage}
@@ -35,7 +36,8 @@ class BlazeBuilder(
   isHttp2Enabled: Boolean,
   maxRequestLineLen: Int,
   maxHeadersLen: Int,
-  serviceMounts: Vector[ServiceMount]
+  serviceMounts: Vector[ServiceMount],
+  listener: HttpEvent => Unit
 )
   extends ServerBuilder
   with IdleTimeoutSupport
@@ -58,8 +60,10 @@ class BlazeBuilder(
                     http2Support: Boolean = isHttp2Enabled,
                maxRequestLineLen: Int = maxRequestLineLen,
                    maxHeadersLen: Int = maxHeadersLen,
-                   serviceMounts: Vector[ServiceMount] = serviceMounts): BlazeBuilder =
-    new BlazeBuilder(socketAddress, serviceExecutor, idleTimeout, isNio2, connectorPoolSize, bufferSize, enableWebSockets, sslBits, http2Support, maxRequestLineLen, maxHeadersLen, serviceMounts)
+                   serviceMounts: Vector[ServiceMount] = serviceMounts,
+                        listener: HttpEvent => Unit = listener
+  ): BlazeBuilder =
+    new BlazeBuilder(socketAddress, serviceExecutor, idleTimeout, isNio2, connectorPoolSize, bufferSize, enableWebSockets, sslBits, http2Support, maxRequestLineLen, maxHeadersLen, serviceMounts, listener)
 
   /** Configure HTTP parser length limits
     *
@@ -120,6 +124,8 @@ class BlazeBuilder(
     copy(serviceMounts = serviceMounts :+ ServiceMount(prefixedService, prefix))
   }
 
+  def withListener(listener: HttpEvent => Unit): BlazeBuilder =
+    copy(listener = listener)
 
   def start: Task[Server] = Task.delay {
     val aggregateService = Router(serviceMounts.map { mount => mount.prefix -> mount.service }: _*)
@@ -141,7 +147,7 @@ class BlazeBuilder(
 
           val l1 =
             if (isHttp2Enabled) LeafBuilder(ProtocolSelector(eng, aggregateService, maxRequestLineLen, maxHeadersLen, requestAttrs, serviceExecutor))
-            else LeafBuilder(Http1ServerStage(aggregateService, requestAttrs, serviceExecutor, enableWebSockets, maxRequestLineLen, maxHeadersLen))
+            else LeafBuilder(Http1ServerStage(aggregateService, requestAttrs, serviceExecutor, enableWebSockets, maxRequestLineLen, maxHeadersLen, listener))
 
           val l2 = if (idleTimeout.isFinite) l1.prepend(new QuietTimeoutStage[ByteBuffer](idleTimeout))
                    else l1
@@ -149,7 +155,9 @@ class BlazeBuilder(
           eng.setUseClientMode(false)
           eng.setNeedClientAuth(clientAuth)
 
-          l2.prepend(new SSLStage(eng))
+          val l3 = l2.prepend(new SSLStage(eng))
+
+          l3.prepend(new MonitorStage(listener))
         }
 
       case None =>
@@ -165,13 +173,16 @@ class BlazeBuilder(
             }
             requestAttrs
           }
-          val leaf = LeafBuilder(Http1ServerStage(aggregateService, requestAttrs, serviceExecutor, enableWebSockets, maxRequestLineLen, maxHeadersLen))
-          if (idleTimeout.isFinite) leaf.prepend(new QuietTimeoutStage[ByteBuffer](idleTimeout))
-          else leaf
+          val l1 = LeafBuilder(Http1ServerStage(aggregateService, requestAttrs, serviceExecutor, enableWebSockets, maxRequestLineLen, maxHeadersLen, listener))
+
+          val l2 = if (idleTimeout.isFinite) l1.prepend(new QuietTimeoutStage[ByteBuffer](idleTimeout))
+          else l1
+
+          l2.prepend(new MonitorStage(listener))
         }
     }
 
-    val factory =
+    var factory =
       if (isNio2)
         NIO2SocketServerGroup.fixedGroup(connectorPoolSize, bufferSize)
       else
@@ -251,7 +262,8 @@ object BlazeBuilder extends BlazeBuilder(
   isHttp2Enabled = false,
   maxRequestLineLen = 4*1024,
   maxHeadersLen = 40*1024,
-  serviceMounts = Vector.empty
+  serviceMounts = Vector.empty,
+  listener = _ => ()
 )
 
 private final case class ServiceMount(service: HttpService, prefix: String)

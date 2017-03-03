@@ -39,7 +39,7 @@ private object ProtocolSelector {
     }
 
     def http1Stage(): TailStage[ByteBuffer] = {
-      Http1ServerStage(service, requestAttributes, es, false, maxRequestLineLen, maxHeadersLen)
+      Http1ServerStage(service, requestAttributes, es, false, maxRequestLineLen, maxHeadersLen, _ => ())
     }
 
     def preference(protos: Seq[String]): String = {

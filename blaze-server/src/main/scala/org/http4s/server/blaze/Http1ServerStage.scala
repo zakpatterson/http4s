@@ -10,7 +10,6 @@ import org.http4s.blaze.util.BodylessWriter
 import org.http4s.blaze.util.Execution._
 import org.http4s.blaze.util.BufferTools.emptyBuffer
 import org.http4s.blaze.http.http_parser.BaseExceptions.{BadRequest, ParserException}
-
 import org.http4s.util.StringWriter
 import org.http4s.syntax.string._
 import org.http4s.headers.{Connection, `Content-Length`, `Transfer-Encoding`}
@@ -33,9 +32,10 @@ private object Http1ServerStage {
             pool: ExecutorService,
             enableWebSockets: Boolean,
             maxRequestLineLen: Int,
-            maxHeadersLen: Int): Http1ServerStage = {
-    if (enableWebSockets) new Http1ServerStage(service, attributes, pool, maxRequestLineLen, maxHeadersLen) with WebSocketSupport
-    else                  new Http1ServerStage(service, attributes, pool, maxRequestLineLen, maxHeadersLen)
+            maxHeadersLen: Int,
+            listener: HttpEvent => Unit): Http1ServerStage = {
+    if (enableWebSockets) new Http1ServerStage(service, attributes, pool, maxRequestLineLen, maxHeadersLen, listener) with WebSocketSupport
+    else                  new Http1ServerStage(service, attributes, pool, maxRequestLineLen, maxHeadersLen, listener)
   }
 }
 
@@ -43,13 +43,15 @@ private class Http1ServerStage(service: HttpService,
                        requestAttrs: AttributeMap,
                        pool: ExecutorService,
                        maxRequestLineLen: Int,
-                       maxHeadersLen: Int)
+                       maxHeadersLen: Int,
+                       listener: HttpEvent => Unit)
                   extends Http1Stage
                   with TailStage[ByteBuffer]
 {
   // micro-optimization: unwrap the service and call its .run directly
   private[this] val serviceFn = service.run
   private[this] val parser = new Http1ServerParser(logger, maxRequestLineLen, maxHeadersLen)
+  private[this] var startNanos: Long = _
 
   protected val ec = ExecutionContext.fromExecutorService(pool)
 
@@ -65,6 +67,8 @@ private class Http1ServerStage(service: HttpService,
   // Will act as our loop
   override def stageStartup(): Unit = {
     logger.debug("Starting HTTP pipeline")
+    startNanos = System.nanoTime
+    listener(HttpEvent.Connect)
     requestLoop()
   }
 
@@ -164,25 +168,38 @@ private class Http1ServerStage(service: HttpService,
       else getEncoder(respConn, respTransferCoding, lengthHeader, resp.trailerHeaders, rr, parser.minorVersion, closeOnFinish)
     }
 
+    def recordCompletion() =
+      listener(HttpEvent.RequestComplete(req, resp, System.nanoTime - startNanos))
+
     bodyEncoder.writeProcess(resp.body).runAsync {
       case \/-(requireClose) =>
         if (closeOnFinish || requireClose) {
+          recordCompletion()
           closeConnection()
           logger.trace("Request/route requested closing connection.")
         } else bodyCleanup().onComplete {
           case s@ Success(_) => // Serve another request
+            recordCompletion()
             parser.reset()
             reqLoopCallback(s)
 
-          case Failure(EOF) => closeConnection()
+          case Failure(EOF) =>
+            recordCompletion()
+            closeConnection()
 
-          case Failure(t) => fatalError(t, "Failure in body cleanup")
+          case Failure(t) =>
+            recordCompletion()
+            listener(HttpEvent.Error(t))
+            fatalError(t, "Failure in body cleanup")
         }(directec)
 
       case -\/(EOF) =>
+        recordCompletion()
         closeConnection()
 
       case -\/(t) =>
+        recordCompletion()
+        listener(HttpEvent.Error(t))
         logger.error(t)("Error writing body")
         closeConnection()
     }
